@@ -94,9 +94,33 @@ export class DependencyManager {
         }
 
         if (detectedPkg && singletonMap[detectedPkg]) {
-            const canonical = singletonMap[detectedPkg];
-            if (this.packageAliases.has(canonical)) {
-                return this.packageAliases.get(canonical);
+            // Only collapse root package imports into the singleton alias.
+            // Subpaths (e.g. three/examples/...) should be treated as separate files 
+            // (that will internally import the root package).
+            
+            let isRoot = true;
+            if (!importSource.startsWith('http') && !importSource.startsWith('.')) {
+                // Bare import: "three" vs "three/examples"
+                if (importSource.length > detectedPkg.length && importSource.startsWith(detectedPkg + '/')) {
+                    isRoot = false;
+                }
+            } else if (importSource.includes(detectedPkg)) {
+                // URL: esm.sh/three vs esm.sh/three/examples
+                const afterPkg = importSource.split(detectedPkg)[1];
+                if (afterPkg && afterPkg.startsWith('/') && !afterPkg.startsWith('/@') && !afterPkg.startsWith('?')) {
+                     // If it continues with a path that isn't just a version or query
+                     // e.g. /three/examples...
+                     if (afterPkg.length > 1 && !afterPkg.startsWith('/?')) {
+                         isRoot = false;
+                     }
+                }
+            }
+
+            if (isRoot) {
+                const canonical = singletonMap[detectedPkg];
+                if (this.packageAliases.has(canonical)) {
+                    return this.packageAliases.get(canonical);
+                }
             }
         }
 
@@ -161,6 +185,10 @@ export class DependencyManager {
                 
                 // 5. Replace other common unsafe-eval patterns in webpack/polyfill code
                 code = code.replace(/Function\("return this"\)\(\)/g, 'window');
+
+                // 6. Generic Function constructor removal (catch-all for "return this")
+                // Be careful not to break valid code, but this specific pattern is strictly for global scope access
+                code = code.replace(/Function\s*\(\s*["']return\s+this["']\s*\)\s*\(\)/g, '(()=>window)');
 
                 // Polyfill import.meta.url for environments that might choke on it or if bundling fails
                 code = code.replace(/import\.meta\.url/g, 'window.location.href');

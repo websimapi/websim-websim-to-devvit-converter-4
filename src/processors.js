@@ -18,6 +18,7 @@ export function uint8ToString(u8) {
 export class DependencyManager {
     constructor() {
         this.downloads = new Map(); // url -> { localPath, processPromise }
+        this.packageAliases = new Map(); // canonicalName -> localPath
         this.vendorCount = 0;
     }
 
@@ -26,6 +27,19 @@ export class DependencyManager {
     resolve(importSource, referrerUrl = null) {
         // 1. Determine URL
         let downloadUrl;
+
+        // Helper to normalize CDN URLs to esm.sh for consistency & caching
+        const normalizeToEsm = (url) => {
+            if (url.includes('unpkg.com/') || url.includes('jsdelivr.net/npm/') || url.includes('cdnjs.cloudflare.com/')) {
+                const match = url.match(/(?:unpkg\.com|jsdelivr\.net\/npm|cdnjs\.cloudflare\.com\/ajax\/libs)\/(@?[^@/]+)(?:@([^/]+))?/);
+                if (match) {
+                    const pkg = match[1];
+                    const ver = match[2] ? `@${match[2]}` : '';
+                    return `https://esm.sh/${pkg}${ver}?target=es2020&bundle`;
+                }
+            }
+            return url;
+        };
         
         if (referrerUrl) {
             // Relative to referrer (inside a vendor file)
@@ -33,7 +47,7 @@ export class DependencyManager {
                 if (importSource.startsWith('.')) {
                     downloadUrl = new URL(importSource, referrerUrl).href;
                 } else if (importSource.startsWith('http')) {
-                    downloadUrl = importSource;
+                    downloadUrl = normalizeToEsm(importSource);
                 } else if (importSource.startsWith('/')) {
                      const origin = new URL(referrerUrl).origin;
                      downloadUrl = new URL(importSource, origin).href;
@@ -52,10 +66,37 @@ export class DependencyManager {
                 return importSource; // Local project file, ignore
             }
             if (importSource.startsWith('http')) {
-                downloadUrl = importSource;
+                downloadUrl = normalizeToEsm(importSource);
             } else {
                 // Bare specifier
                 downloadUrl = `https://esm.sh/${importSource}?target=es2020&bundle`;
+            }
+        }
+
+        // --- SINGLETON ENFORCEMENT ---
+        // Detect key libraries to prevent multiple versions loading (Three.js context issues)
+        const singletonMap = {
+            'three': 'three',
+            'three.js': 'three', 
+            '@tweenjs/tween.js': 'tween',
+            'tween.js': 'tween',
+            'pixi.js': 'pixi'
+        };
+
+        let detectedPkg = null;
+        if (!importSource.startsWith('.') && !importSource.startsWith('/') && !importSource.startsWith('http')) {
+             detectedPkg = importSource.split('/')[0];
+             if (importSource.startsWith('@')) detectedPkg = importSource.split('/').slice(0,2).join('/');
+        } else {
+             const u = downloadUrl;
+             if (u.includes('/three')) detectedPkg = 'three';
+             else if (u.includes('tween.js')) detectedPkg = 'tween.js';
+        }
+
+        if (detectedPkg && singletonMap[detectedPkg]) {
+            const canonical = singletonMap[detectedPkg];
+            if (this.packageAliases.has(canonical)) {
+                return this.packageAliases.get(canonical);
             }
         }
 
@@ -78,6 +119,14 @@ export class DependencyManager {
         
         const localPath = `./vendor/${safeName}.js`;
 
+        // Register alias if it's a singleton candidate
+        if (detectedPkg && singletonMap[detectedPkg]) {
+            const canonical = singletonMap[detectedPkg];
+            if (!this.packageAliases.has(canonical)) {
+                this.packageAliases.set(canonical, localPath);
+            }
+        }
+
         console.log(`[Converter] Resolving Dependency: ${importSource} -> ${downloadUrl} -> ${localPath}`);
 
         // 4. Start Download & Recursion
@@ -87,6 +136,13 @@ export class DependencyManager {
                 const res = await fetch(downloadUrl);
                 if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
                 let code = await res.text();
+
+                // SPECIAL PATCH: Tween.js interop for common issue where TWEEN.Tween is missing
+                if ((safeName.includes('tween') || downloadUrl.includes('tween')) && code.includes('export class Tween') && !code.match(/export\s+default/)) {
+                     // Heuristic to export all named exports as default object if default is missing
+                     // This fixes cases where 'import TWEEN from "tween.js"' expects a namespace object
+                     code += `\n/* Patch for default export */\nvar _def = { Tween: (typeof Tween !== 'undefined' ? Tween : undefined), Easing: (typeof Easing !== 'undefined' ? Easing : undefined), update: (typeof update !== 'undefined' ? update : function(){}) };\nexport default _def;`;
+                }
 
                 // Sanitize vendor code to prevent CSP violations (eval, new Function)
                 

@@ -85,6 +85,19 @@ export const simpleLoggerJs = `
       console.warn('[WebSim] AudioContext polyfill failed', e);
   }
 
+  // --- Fullscreen Disable ---
+  // Prevent games from attempting fullscreen which can break embedded views
+  try {
+      const blockFS = () => { console.log('[WebSim] Blocked fullscreen request'); return Promise.resolve(); };
+      ['requestFullscreen', 'webkitRequestFullscreen', 'mozRequestFullScreen', 'msRequestFullscreen'].forEach(m => {
+           if (typeof Element !== 'undefined' && Element.prototype) Element.prototype[m] = blockFS;
+           if (typeof document !== 'undefined' && document[m]) document[m] = blockFS;
+      });
+      ['exitFullscreen', 'webkitExitFullscreen', 'mozCancelFullScreen', 'msExitFullscreen'].forEach(m => {
+          if (typeof document !== 'undefined' && document[m]) document[m] = blockFS;
+      });
+  } catch(e) { console.warn('[WebSim] Failed to patch fullscreen', e); }
+
   // Signal ready
   console.log('[WebSim Logger] Bridge initialized.');
 })();

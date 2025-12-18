@@ -60,6 +60,11 @@ files.forEach(fileObj => {
             issues++;
         }
 
+        // Check for fullscreen usage (Informational)
+        if (content.match(/requestFullscreen|webkitRequestFullscreen/i)) {
+             console.log(\`   ℹ️  Detected fullscreen usage in \${f}. This will be auto-blocked by the runtime polyfill.\`);
+        }
+
         // Check for inline scripts in HTML
         if (f.endsWith('.html')) {
              const scriptRegex = new RegExp('<script[^>]*>[^<]+</script>', 'i');

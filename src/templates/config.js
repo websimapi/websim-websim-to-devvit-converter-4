@@ -1,10 +1,11 @@
-export const generatePackageJson = (slug) => JSON.stringify({
+export const generatePackageJson = (slug, dependencies = {}) => JSON.stringify({
   "name": slug,
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "devvit playtest",
+    "build:client": "vite build",
     "setup": "node scripts/setup.js", 
     "register": "devvit upload",
     "upload": "devvit upload",
@@ -13,11 +14,14 @@ export const generatePackageJson = (slug) => JSON.stringify({
   "dependencies": {
     "@devvit/public-api": "latest",
     "@devvit/kit": "latest",
-    "@devvit/web": "latest"
+    "@devvit/web": "latest",
+    ...dependencies
   },
   "devDependencies": {
     "devvit": "latest",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0",
+    "terser": "^5.19.0"
   }
 }, null, 2);
 
@@ -25,6 +29,28 @@ export const generateDevvitYaml = (slug) => `
 name: ${slug}
 version: 0.1.0
 webroot: webroot
+`;
+
+export const generateViteConfig = () => `
+import { defineConfig } from 'vite';
+import { resolve } from 'path';
+
+export default defineConfig({
+  root: 'client',
+  base: './',
+  build: {
+    outDir: '../webroot',
+    emptyOutDir: true,
+    target: 'es2020',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'three-core': ['three']
+        }
+      }
+    }
+  }
+});
 `;
 
 export const tsConfig = JSON.stringify({

@@ -1,14 +1,13 @@
 import JSZip from 'jszip';
 import { 
     cleanName, 
-    DependencyManager, 
-    processJsForImports, 
-    processHtmlForCSP 
+    AssetAnalyzer 
 } from './processors.js';
 
 import {
     generatePackageJson,
     generateDevvitYaml,
+    generateViteConfig,
     tsConfig,
     getMainTsx,
     simpleLoggerJs,
@@ -18,14 +17,6 @@ import {
     generateReadme
 } from './templates.js';
 
-// removed helper functions: cleanName, uint8ToString (moved to processors.js)
-
-// removed DependencyManager class (moved to processors.js)
-// removed processJsForImports function (moved to processors.js)
-// removed processHtmlForCSP function (moved to processors.js)
-
-// removed template generators: generatePackageJson, generateDevvitYaml, tsConfig, getMainTsx... (moved to templates.js)
-
 export async function generateDevvitZip(projectMeta, assets, includeReadme = true) {
     const zip = new JSZip();
     
@@ -34,12 +25,55 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     const projectSlug = cleanName(`${rawSlug}-${safeId}`);
     const projectTitle = projectMeta.project.title || "WebSim Game";
 
-    // 1. Config Files
-    zip.file("package.json", generatePackageJson(projectSlug));
-    zip.file("devvit.yaml", generateDevvitYaml(projectSlug));
-    zip.file("tsconfig.json", tsConfig);
-    zip.file(".gitignore", "node_modules\n.devvit");
+    // Initialize Analyzer
+    const analyzer = new AssetAnalyzer();
+    const clientFiles = {};
+
+    // 1. Process Assets for Client Folder
+    // We categorize files: JS gets rewritten, HTML gets cleaned, rest copied.
     
+    for (const [path, content] of Object.entries(assets)) {
+        if (path.includes('..')) continue;
+
+        if (path.endsWith('.js') || path.endsWith('.mjs') || path.endsWith('.ts')) {
+            const processed = analyzer.processJS(content, path);
+            clientFiles[path] = processed;
+        } else if (path.endsWith('.html')) {
+            const { html, extractedScripts } = analyzer.processHTML(content, path.split('/').pop());
+            clientFiles[path] = html;
+            
+            // Add extracted inline scripts to client files
+            extractedScripts.forEach(script => {
+                // Place them relative to the html file
+                const parts = path.split('/');
+                parts.pop();
+                const dir = parts.join('/');
+                const fullPath = dir ? `${dir}/${script.filename}` : script.filename;
+                clientFiles[fullPath] = script.content;
+            });
+        } else {
+            // Static assets (images, css, etc)
+            clientFiles[path] = content;
+        }
+    }
+
+    // Identify Index for Devvit Main.tsx
+    let indexPath = 'index.html'; 
+    for (const p of Object.keys(clientFiles)) {
+        if (p.endsWith('index.html')) {
+            indexPath = p;
+            break; 
+        }
+    }
+
+    // 2. Generate Config Files
+    // Now that we've analyzed files, analyzer.dependencies is populated
+    zip.file("package.json", generatePackageJson(projectSlug, analyzer.dependencies));
+    zip.file("devvit.yaml", generateDevvitYaml(projectSlug));
+    zip.file("vite.config.js", generateViteConfig());
+    zip.file("tsconfig.json", tsConfig);
+    zip.file(".gitignore", "node_modules\n.devvit\nwebroot/assets"); // Ignore build artifacts if needed
+
     if (includeReadme) {
         zip.file("README.md", generateReadme(projectTitle, `https://websim.ai/p/${projectMeta.project.id}`));
     }
@@ -47,104 +81,21 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     zip.file("scripts/setup.js", setupScript);
     zip.file("scripts/validate.js", validateScript);
 
-    // 2. Web Root Processing
-    const webRoot = zip.folder("webroot");
-    
-    // Identify Index
-    let indexPath = 'index.html'; 
-    let foundIndex = false;
-    let indexDir = '';
-
-    for (const p of Object.keys(assets)) {
-        if (p.endsWith('index.html')) {
-            indexPath = p;
-            foundIndex = true;
-            // Determine directory of index.html for debug-bridge placement
-            const parts = p.split('/');
-            parts.pop();
-            indexDir = parts.length > 0 ? parts.join('/') + '/' : '';
-            break; // Use the first index found
-        }
-    }
-    
-    if (!foundIndex) {
-        webRoot.file("index.html", "<html><body><h1>Game Found No Index</h1></body></html>");
+    // 3. Client Folder (Source)
+    const clientFolder = zip.folder("client");
+    for (const [path, content] of Object.entries(clientFiles)) {
+        clientFolder.file(path, content);
     }
 
-    // --- Execution ---
-    const depManager = new DependencyManager();
-    const processedFiles = {};
-    const knownModules = new Set();
-    
-    // Pass 1: JS Files - Identify Modules & Rewrite Imports
-    for (const [path, content] of Object.entries(assets)) {
-        if (path.includes('..')) continue;
+    // Add Polyfills to Client
+    clientFolder.file("logger.js", simpleLoggerJs);
+    clientFolder.file("websim_socket.js", websimSocketPolyfill);
 
-        if (path.endsWith('.js') || path.endsWith('.mjs')) {
-            const { content: processed, isModule } = processJsForImports(content, depManager, path);
-            processedFiles[path] = processed;
-            if (isModule) knownModules.add(path);
-        } else if (!path.endsWith('.html')) {
-            // Static assets
-            processedFiles[path] = content;
-        }
-    }
-
-    // Pass 2: HTML Files - Inject Debugger, Fix Paths, Handle Scripts, Resolve Import Maps
-    for (const [path, content] of Object.entries(assets)) {
-        if (path.includes('..')) continue;
-
-        if (path.endsWith('.html')) {
-            const { html, extractedScripts } = processHtmlForCSP(content, path.split('/').pop(), depManager, knownModules, path);
-            processedFiles[path] = html;
-            
-            // Handle extracted inline scripts
-            extractedScripts.forEach(s => {
-                const parts = path.split('/');
-                parts.pop();
-                const dir = parts.join('/');
-                const fullPath = dir ? `${dir}/${s.filename}` : s.filename;
-                processedFiles[fullPath] = s.content;
-            });
-        }
-    }
-
-    // Pass 3: Resolve & Download External Dependencies
-    // This is async and might take a moment
-    const vendorFiles = await depManager.getVendorFiles();
-    for (const [vPath, vContent] of Object.entries(vendorFiles)) {
-        webRoot.file(vPath, vContent);
-    }
-
-    // Write all processed files to zip
-    for (const [path, content] of Object.entries(processedFiles)) {
-        webRoot.file(path, content);
-    }
-
-    // Add Logger & Socket Polyfill
-    webRoot.file("logger.js", simpleLoggerJs);
-    webRoot.file("websim_socket.js", websimSocketPolyfill);
-    
-    const htmlDirs = new Set();
-    // Re-scan for html dirs
-    for (const [path, content] of Object.entries(processedFiles)) {
-        if (path.endsWith('.html')) {
-             const parts = path.split('/');
-             parts.pop();
-             if (parts.length > 0) {
-                 htmlDirs.add(parts.join('/') + '/');
-             }
-        }
-    }
-    
-    htmlDirs.forEach(dir => {
-        webRoot.file(`${dir}logger.js`, simpleLoggerJs);
-        webRoot.file(`${dir}websim_socket.js`, websimSocketPolyfill);
-    });
-
-    // 3. Source Code (Main.tsx)
+    // 4. Source Code (Devvit Main.tsx)
     zip.file("src/main.tsx", getMainTsx(projectTitle, indexPath));
 
+    // Note: 'webroot' folder is not created here, it will be created by 'npm run build:client' inside the user's project.
+    
     const blob = await zip.generateAsync({ type: "blob" });
     return { blob, filename: `${projectSlug}-devvit.zip` };
 }
